@@ -1,0 +1,34 @@
+# --- Sensitive: real documents & their derived outputs (NEVER commit) ---
+# real Thai IDs, passport, SSN, bank forms — PII
+test-files/
+# AI responses contain text extracted from the real docs
+bench_report_*.txt
+# generated reports, plots, audit records
+outputs/
+# synthetic + any staged image data
+data/
+cache/
+
+# --- Secrets ---
+.env
+*.key
+*credentials*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# --- Models / large weights (live in the HF cache, never in-repo) ---
+*.safetensors
+*.bin
+*.gguf
+
+# --- Tooling / scratch ---
+.omc/
+_preview.png
+*_preview.png
