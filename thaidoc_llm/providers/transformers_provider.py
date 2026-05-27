@@ -61,6 +61,10 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # Crop/deskew/contrast messy A4 scans before classifying. On by default; set
 # THAIDOC_LLM_PREPROCESS=0 to feed the raw image (A/B comparison).
 _PREPROCESS = os.environ.get("THAIDOC_LLM_PREPROCESS", "1").lower() not in ("0", "false", "no")
+# Generation budget. "Thinking" Qwen3-VL models spend hundreds of tokens reasoning
+# BEFORE emitting the JSON, so a tight budget truncates the answer away. 1024 leaves
+# room for a full thinking trace plus the JSON; raise it for very verbose reasoning.
+_MAX_NEW_TOKENS = int(os.environ.get("THAIDOC_LLM_MAX_NEW_TOKENS", "1024"))
 
 # EVIDENCE-FIRST, SINGLE PASS. The earlier two-stage "pick a family, then a type"
 # scheme biased results: the visual families are mega-buckets (most labels fall
@@ -137,9 +141,25 @@ def _first(d: dict, keys) -> str:
     return ""
 
 
+def _split_thinking(text: str) -> tuple:
+    """Separate a "thinking" model's reasoning trace from its answer.
+
+    Qwen3-VL thinking models emit <think>...</think> before the JSON. Return
+    (thinking, answer); thinking is "" when there's no trace. A truncated, never-
+    closed <think> means the model ran out of tokens before answering -> the whole
+    thing is reasoning with no answer."""
+    text = text.strip()
+    m = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
+    if m:
+        return m.group(1).strip(), text[m.end():].strip()
+    if "<think>" in text:  # opener but no close -> truncated mid-thought
+        return text.split("<think>", 1)[1].strip(), ""
+    return "", text
+
+
 def _extract_json(text: str) -> dict:
     """Tolerantly pull the JSON object out of a model's free-text reply."""
-    text = text.strip()
+    thinking, text = _split_thinking(text)
     # Strip ```json fences if present.
     text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.MULTILINE).strip()
     try:
@@ -154,6 +174,12 @@ def _extract_json(text: str) -> dict:
             return json.loads(text[start:end + 1])
         except json.JSONDecodeError:
             pass
+    # A thinking trace but no answer == the budget ran out mid-thought.
+    if thinking and not text:
+        raise ProviderUnavailable(
+            "Thinking model used its whole token budget reasoning and never "
+            "emitted the JSON. Raise THAIDOC_LLM_MAX_NEW_TOKENS (currently "
+            f"{_MAX_NEW_TOKENS}). Trace tail: {thinking[-200:]!r}")
     raise ProviderUnavailable(
         f"Model did not return parseable JSON: {text[:200]!r}")
 
@@ -257,9 +283,19 @@ class TransformersProvider(LLMProvider):
             bnb_4bit_compute_dtype=torch.float16,
         )
 
-    def _ask(self, image, system_text: str, user_text: str, max_new_tokens=256):
+    def _ask(self, image, system_text: str, user_text: str,
+             max_new_tokens: Optional[int] = None):
         """One model call: image + a numbered list -> parsed JSON dict.
-        Returns (parsed, prompt_len, gen_len)."""
+        Returns (parsed, thinking, prompt_len, gen_len).
+
+        Chain-of-thought is left ENABLED: a thinking Qwen3-VL reasons through the
+        Thai title/codes before answering, which helps on ambiguous subtypes. That
+        reasoning is captured (and surfaced in the audit trail) rather than thrown
+        away. The token budget must therefore be generous (THAIDOC_LLM_MAX_NEW_TOKENS,
+        default 1024) so the JSON survives after the trace; too tight a budget gets
+        consumed by reasoning and the answer never appears."""
+        if max_new_tokens is None:
+            max_new_tokens = _MAX_NEW_TOKENS
         messages = [
             {"role": "system", "content": system_text},
             {"role": "user", "content": [
@@ -277,7 +313,8 @@ class TransformersProvider(LLMProvider):
                                        do_sample=False)
         gen = out[0][prompt_len:]
         decoded = self._processor.decode(gen, skip_special_tokens=True)
-        return _extract_json(decoded), int(prompt_len), int(gen.shape[0])
+        thinking, _ = _split_thinking(decoded)
+        return _extract_json(decoded), thinking, int(prompt_len), int(gen.shape[0])
 
     @staticmethod
     def _pick(parsed: dict, mapping: dict):
@@ -298,15 +335,22 @@ class TransformersProvider(LLMProvider):
 
         # Single evidence-first pass: read keywords -> match one id (no family gate).
         id_map, sys_prompt = _full_catalog()
-        parsed, pin, pout = self._ask(image, sys_prompt, _EVIDENCE_USER_TEXT)
+        parsed, thinking, pin, pout = self._ask(image, sys_prompt, _EVIDENCE_USER_TEXT)
         label = self._pick(parsed, id_map)
         if label is None:
             label = UNKNOWN_TYPE
         conf = parsed.get("confidence", parsed.get("confidence_score"))
         evidence = parsed.get("evidence")
+        # Audit trail: the quoted evidence plus the model's reasoning trace (if the
+        # model is a thinking variant). Truncate the trace so the record stays small.
+        parts = []
+        if evidence:
+            parts.append(f"evidence={evidence}")
+        if thinking:
+            parts.append(f"thinking={thinking[:800]}")
         return LLMResult(
             physical_type=label,
             confidence=float(conf) if conf is not None else 0.0,
-            reasoning=(f"evidence={evidence}" if evidence else None),
+            reasoning="; ".join(parts) if parts else None,
             usage={"input_tokens": int(pin), "output_tokens": int(pout),
                    "cached_content_token_count": 0})
