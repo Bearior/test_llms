@@ -75,7 +75,7 @@ _EVIDENCE_INSTRUCTIONS = (
     "You are a document-type classifier for a Thai bank's KYC / onboarding "
     "workflow. You are shown one scanned document image. Identify which ONE "
     "type from the numbered list it is.\n\n"
-    "Decide by KEYWORDS, not by overall look:\n"
+    "Decide by KEYWORDS and by overall look:\n"
     "- Read the document's TITLE (Thai and English) and any short CODES: visa "
     'letters in quotes (e.g. "B", "F", "ED"), household-registration form '
     "numbers (e.g. ทร.14, ทร.13/1), or the leading digits of a 13-digit ID "
