@@ -62,9 +62,16 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 # THAIDOC_LLM_PREPROCESS=0 to feed the raw image (A/B comparison).
 _PREPROCESS = os.environ.get("THAIDOC_LLM_PREPROCESS", "1").lower() not in ("0", "false", "no")
 # Generation budget. "Thinking" Qwen3-VL models spend hundreds of tokens reasoning
-# BEFORE emitting the JSON, so a tight budget truncates the answer away. 1024 leaves
-# room for a full thinking trace plus the JSON; raise it for very verbose reasoning.
-_MAX_NEW_TOKENS = int(os.environ.get("THAIDOC_LLM_MAX_NEW_TOKENS", "1024"))
+# BEFORE emitting the JSON, so a tight budget truncates the answer away. 2048 leaves
+# room for a full thinking trace plus the JSON on most docs.
+_MAX_NEW_TOKENS = int(os.environ.get("THAIDOC_LLM_MAX_NEW_TOKENS", "2048"))
+# Hard ceiling for the auto-escalation: when a thinking trace is truncated mid-thought
+# (it hit the budget and never emitted the JSON), generation is retried with a doubled
+# budget up to this cap, so a verbose reasoner still finishes the job. Raise it if even
+# this isn't enough; lower it to bound worst-case latency per image.
+_MAX_NEW_TOKENS_CEILING = int(
+    os.environ.get("THAIDOC_LLM_MAX_NEW_TOKENS_CEILING",
+                   str(max(_MAX_NEW_TOKENS, 6144))))
 
 # EVIDENCE-FIRST, SINGLE PASS. The earlier two-stage "pick a family, then a type"
 # scheme biased results: the visual families are mega-buckets (most labels fall
@@ -174,12 +181,15 @@ def _extract_json(text: str) -> dict:
             return json.loads(text[start:end + 1])
         except json.JSONDecodeError:
             pass
-    # A thinking trace but no answer == the budget ran out mid-thought.
+    # A thinking trace but no answer == the budget ran out mid-thought. _ask retries
+    # with a doubled budget up to the ceiling; if we still land here, even the ceiling
+    # wasn't enough for this doc's reasoning.
     if thinking and not text:
         raise ProviderUnavailable(
-            "Thinking model used its whole token budget reasoning and never "
-            "emitted the JSON. Raise THAIDOC_LLM_MAX_NEW_TOKENS (currently "
-            f"{_MAX_NEW_TOKENS}). Trace tail: {thinking[-200:]!r}")
+            "Thinking model exhausted the token budget reasoning (up to the "
+            f"ceiling {_MAX_NEW_TOKENS_CEILING}) and never emitted the JSON. Raise "
+            "THAIDOC_LLM_MAX_NEW_TOKENS_CEILING. Trace tail: "
+            f"{thinking[-200:]!r}")
     raise ProviderUnavailable(
         f"Model did not return parseable JSON: {text[:200]!r}")
 
@@ -291,9 +301,13 @@ class TransformersProvider(LLMProvider):
         Chain-of-thought is left ENABLED: a thinking Qwen3-VL reasons through the
         Thai title/codes before answering, which helps on ambiguous subtypes. That
         reasoning is captured (and surfaced in the audit trail) rather than thrown
-        away. The token budget must therefore be generous (THAIDOC_LLM_MAX_NEW_TOKENS,
-        default 1024) so the JSON survives after the trace; too tight a budget gets
-        consumed by reasoning and the answer never appears."""
+        away.
+
+        To guarantee the model FINISHES (thinks AND emits the JSON), the budget
+        auto-escalates: if a run hits its token cap mid-thought with no parseable
+        answer, it retries with double the budget up to THAIDOC_LLM_MAX_NEW_TOKENS_
+        CEILING. Greedy decoding is deterministic, so the larger budget reproduces
+        the same trace and lets it run to completion."""
         if max_new_tokens is None:
             max_new_tokens = _MAX_NEW_TOKENS
         messages = [
@@ -308,13 +322,27 @@ class TransformersProvider(LLMProvider):
         inputs = self._processor(
             text=[text], images=[image], return_tensors="pt").to(self.device)
         prompt_len = inputs["input_ids"].shape[1]
-        with self._torch.no_grad():
-            out = self._model.generate(**inputs, max_new_tokens=max_new_tokens,
-                                       do_sample=False)
-        gen = out[0][prompt_len:]
-        decoded = self._processor.decode(gen, skip_special_tokens=True)
-        thinking, _ = _split_thinking(decoded)
-        return _extract_json(decoded), thinking, int(prompt_len), int(gen.shape[0])
+
+        budget = max_new_tokens
+        while True:
+            with self._torch.no_grad():
+                out = self._model.generate(**inputs, max_new_tokens=budget,
+                                           do_sample=False)
+            gen = out[0][prompt_len:]
+            gen_len = int(gen.shape[0])
+            decoded = self._processor.decode(gen, skip_special_tokens=True)
+            # Hit the cap == generation was cut off, not stopped at EOS; a parse
+            # failure here is almost certainly truncation, so escalate and retry.
+            truncated = gen_len >= budget
+            try:
+                parsed = _extract_json(decoded)
+            except ProviderUnavailable:
+                if truncated and budget < _MAX_NEW_TOKENS_CEILING:
+                    budget = min(budget * 2, _MAX_NEW_TOKENS_CEILING)
+                    continue
+                raise
+            thinking, _ = _split_thinking(decoded)
+            return parsed, thinking, int(prompt_len), gen_len
 
     @staticmethod
     def _pick(parsed: dict, mapping: dict):
