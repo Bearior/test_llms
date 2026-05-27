@@ -202,12 +202,10 @@ class TransformersProvider(LLMProvider):
                 if quant is not None:
                     load_kwargs["quantization_config"] = quant
                     self.quantized = True
-                    # Reserve ~1 GB VRAM headroom for activations; let anything
-                    # that doesn't fit spill to CPU (needed for a 7B on a 6 GB
-                    # card). The 3B fits entirely on-GPU so this is a no-op there.
-                    free, _ = torch.cuda.mem_get_info()
-                    gpu_gib = max(1, int(free / (1024 ** 3)) - 1)
-                    load_kwargs["max_memory"] = {0: f"{gpu_gib}GiB", "cpu": "48GiB"}
+                    # NOTE: we do NOT enable CPU offload. 4-bit CPU offload hits a
+                    # bitsandbytes/transformers bug and needs lots of system RAM,
+                    # so a model that doesn't fit VRAM fails fast here instead
+                    # (e.g. a 7B won't fit 6 GB -> use the 3B, or a bigger GPU).
                 else:
                     # No quantization -> fp16. WARNING: a 3B/7B in fp16 may not
                     # fit on a small (<=6 GB) GPU; install bitsandbytes for 4-bit.
@@ -221,10 +219,17 @@ class TransformersProvider(LLMProvider):
                 self._model = self._model.to(self.device)
             self._model.eval()
         except Exception as e:
+            msg = str(e).lower()
+            hint = ("If air-gapped, pre-stage the weights and set "
+                    "THAIDOC_LLM_OFFLINE=1, or point --model at a local directory.")
+            if any(k in msg for k in ("memory", "cpu or the disk", "offload",
+                                      "_is_hf_initialized", "out of memory")):
+                hint = ("This model does not fit your GPU's VRAM. On a small "
+                        "(<=6 GB) card use the 3B instead:\n"
+                        "    --model Qwen/Qwen2.5-VL-3B-Instruct\n"
+                        "The 7B needs a GPU with >=12 GB VRAM to run fully on-GPU.")
             raise ProviderUnavailable(
-                f"Failed to load {self.model_id} on {self.device}: {e}\n"
-                "If air-gapped, pre-stage the weights and set THAIDOC_LLM_OFFLINE=1, "
-                "or point --model at a local directory."
+                f"Failed to load {self.model_id} on {self.device}: {e}\n{hint}"
             ) from e
 
     def _maybe_4bit_config(self, torch):
@@ -250,9 +255,6 @@ class TransformersProvider(LLMProvider):
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.float16,
-            # Allow layers that don't fit in VRAM to live on CPU (slower) rather
-            # than failing to load — required for a 7B on a 6 GB card.
-            llm_int8_enable_fp32_cpu_offload=True,
         )
 
     def _ask(self, image, system_text: str, user_text: str, max_new_tokens=256):
