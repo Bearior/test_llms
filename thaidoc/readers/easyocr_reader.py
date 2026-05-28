@@ -53,15 +53,29 @@ class EasyOCRReader(Reader):
                 f"gpu={gpu}: {e}") from e
 
     def read(self, image_path: Path, record: Optional[dict] = None) -> ReaderResult:
-        # detail=0 -> return list[str] of recognized lines, no bboxes/scores.
-        # paragraph=True groups nearby lines so we get reading-order text rather
-        # than a jumble of scattered short detections.
+        # Load via PIL first, then pass a numpy array to EasyOCR. This sidesteps
+        # EasyOCR's tifffile path, which fails on LZW-compressed TIFFs without
+        # the imagecodecs package -- common for scanned banking docs. PIL has
+        # native LZW support, so this "just works" for .tif/.tiff/.jpg/.png.
         try:
-            lines = self._reader.readtext(
-                str(image_path), detail=0, paragraph=True)
-        except Exception as e:  # noqa: BLE001 - report and return empty
-            # EasyOCR can throw on malformed images; surface via empty text and
-            # let the caller (ocr_llm provider) cascade to the VLM.
+            from PIL import Image
+            import numpy as np
+            img = Image.open(image_path)
+            # Multi-page TIFF: take the first page only (scans are usually 1pg).
+            try:
+                img.seek(0)
+            except (AttributeError, EOFError):
+                pass
+            img = img.convert("RGB")
+            arr = np.array(img)
+        except Exception as e:  # noqa: BLE001 - report and cascade
+            print(f"[easyocr] could not decode {image_path}: {e}")
+            return ReaderResult(text="")
+        # detail=0 -> list[str] of recognized lines; paragraph=True groups nearby
+        # lines into reading-order paragraphs instead of scattered detections.
+        try:
+            lines = self._reader.readtext(arr, detail=0, paragraph=True)
+        except Exception as e:  # noqa: BLE001 - report and cascade
             print(f"[easyocr] readtext failed on {image_path}: {e}")
             return ReaderResult(text="")
         return ReaderResult(text=" ".join(s for s in lines if s).strip())
