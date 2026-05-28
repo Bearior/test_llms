@@ -54,8 +54,13 @@ _MAX_NEW_TOKENS_CEILING = int(
 _CASCADE = os.environ.get("THAIDOC_LLM_OCR_CASCADE", "1").lower() not in ("0", "false", "no")
 _CASCADE_CONF = float(os.environ.get("THAIDOC_LLM_OCR_CASCADE_CONF", "0.50"))
 _OCR_MIN_CHARS = int(os.environ.get("THAIDOC_LLM_OCR_MIN_CHARS", "15"))
-# OCR language (PaddleOCR code). Override only if you also pass docs in a
-# language other than Thai.
+# OCR engine. EasyOCR has reliable Thai support; PaddleOCR's Thai is missing
+# in many current builds, so it's no longer the default. Override with
+# THAIDOC_LLM_OCR_ENGINE=paddle if you want to A/B test on a host where Paddle
+# is actually Thai-capable.
+_OCR_ENGINE = os.environ.get("THAIDOC_LLM_OCR_ENGINE", "easyocr").lower()
+# Single-language code for PaddleOCR (when chosen); EasyOCR reads its multi-
+# language list from THAIDOC_LLM_OCR_LANGS instead (see easyocr_reader.py).
 _OCR_LANG = os.environ.get("THAIDOC_LLM_OCR_LANG", "th")
 
 # Reduce CUDA fragmentation OOMs on small cards (harmless elsewhere).
@@ -172,19 +177,25 @@ class OcrLlmProvider(LLMProvider):
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-        # --- OCR: PaddleOCR Thai ---
+        # --- OCR: EasyOCR (default, Thai-capable) or PaddleOCR (opt-in) ---
         try:
             from thaidoc.readers.base import ReaderUnavailable
-            from thaidoc.readers.paddle import PaddleOCRReader
         except Exception as e:
             raise ProviderUnavailable(
-                f"ocr_llm needs the thaidoc.readers.paddle reader: {e}") from e
+                f"ocr_llm needs thaidoc.readers: {e}") from e
+        self.ocr_engine = _OCR_ENGINE
         try:
-            self._ocr = PaddleOCRReader(lang=_OCR_LANG)
+            if _OCR_ENGINE == "paddle":
+                from thaidoc.readers.paddle import PaddleOCRReader
+                self._ocr = PaddleOCRReader(lang=_OCR_LANG)
+            else:
+                from thaidoc.readers.easyocr_reader import EasyOCRReader
+                self._ocr = EasyOCRReader()
         except ReaderUnavailable as e:
+            install = ("pip install easyocr" if _OCR_ENGINE != "paddle"
+                       else 'pip install "paddleocr" "paddlepaddle"')
             raise ProviderUnavailable(
-                "ocr_llm needs PaddleOCR installed. Run:\n"
-                "    pip install \"paddleocr\" \"paddlepaddle\"\n"
+                f"ocr_llm needs an OCR engine installed. Run:\n    {install}\n"
                 f"(original error: {e})") from e
 
         # --- text LLM (small reasoner) ---
