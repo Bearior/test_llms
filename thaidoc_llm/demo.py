@@ -33,7 +33,8 @@ def main(argv=None) -> int:
     _force_utf8_stdout()
     ap = argparse.ArgumentParser(description="Cloud-LLM Thai document classifier demo")
     ap.add_argument("--provider", default="mock",
-                    choices=["mock", "gemini", "anthropic", "ollama", "transformers"])
+                    choices=["mock", "gemini", "anthropic", "ollama",
+                             "transformers", "ocr_llm"])
     ap.add_argument("--model", default=None, help="override model id")
     ap.add_argument("--samples", type=int, default=10)
     ap.add_argument("--image", default=None,

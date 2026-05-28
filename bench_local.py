@@ -42,7 +42,8 @@ def main(argv=None) -> int:
     _utf8()
     ap = argparse.ArgumentParser()
     ap.add_argument("--provider", default="transformers",
-                    choices=["transformers", "gemini", "anthropic", "ollama", "mock"])
+                    choices=["transformers", "ocr_llm", "gemini",
+                             "anthropic", "ollama", "mock"])
     ap.add_argument("--model", default=None, help="override model id")
     ap.add_argument("--dir", default="test-files")
     ap.add_argument("--out", default=None,

@@ -13,6 +13,9 @@ OLLAMA_MODEL = os.environ.get("THAIDOC_LLM_OLLAMA_MODEL", "qwen2.5vl:7b")
 # Local, in-process vision model via Hugging Face transformers (no app/server).
 TRANSFORMERS_MODEL = os.environ.get(
     "THAIDOC_LLM_TRANSFORMERS_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
+# Local OCR -> small reasoning text LLM pipeline (PaddleOCR + Qwen3-1.7B).
+# Much faster than a VLM; cascades to the VLM on low confidence (see provider).
+OCR_LLM_MODEL = os.environ.get("THAIDOC_LLM_OCR_LLM_MODEL", "Qwen/Qwen3-1.7B")
 
 # Default provider: the small, free Gemini model. Override with
 # THAIDOC_LLM_PROVIDER=anthropic|mock. Falls back to mock if unavailable.
@@ -32,5 +35,6 @@ def default_model_for(provider: str) -> str:
         "gemini": GEMINI_MODEL,
         "ollama": OLLAMA_MODEL,
         "transformers": TRANSFORMERS_MODEL,
+        "ocr_llm": OCR_LLM_MODEL,
         "mock": "mock",
     }.get((provider or "").lower(), GEMINI_MODEL)

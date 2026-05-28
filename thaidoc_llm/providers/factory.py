@@ -6,7 +6,7 @@ from typing import Optional
 from .. import config
 from .base import LLMProvider
 
-_PROVIDERS = ("mock", "gemini", "anthropic", "ollama", "transformers")
+_PROVIDERS = ("mock", "gemini", "anthropic", "ollama", "transformers", "ocr_llm")
 
 
 def get_provider(provider: str = config.DEFAULT_PROVIDER, *,
@@ -29,4 +29,7 @@ def get_provider(provider: str = config.DEFAULT_PROVIDER, *,
     if provider == "transformers":
         from .transformers_provider import TransformersProvider
         return TransformersProvider(model=model)
+    if provider == "ocr_llm":
+        from .ocr_llm_provider import OcrLlmProvider
+        return OcrLlmProvider(model=model)
     raise ValueError(f"Unknown provider {provider!r}. Choose from {_PROVIDERS}.")
