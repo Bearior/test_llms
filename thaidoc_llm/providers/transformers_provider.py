@@ -86,13 +86,24 @@ _EVIDENCE_INSTRUCTIONS = (
     "You are a document-type classifier for a Thai bank's KYC / onboarding "
     "workflow. You are shown one scanned document image. Identify which ONE "
     "type from the numbered list it is.\n\n"
-    "Decide by KEYWORDS and by overall look:\n"
-    "- Read the document's TITLE (Thai and English) and any short CODES: visa "
-    'letters in quotes (e.g. "B", "F", "ED"), household-registration form '
-    "numbers (e.g. ทร.14, ทร.13/1), or the leading digits of a 13-digit ID "
-    "number.\n"
-    "- Pick the list entry whose label keywords match what you actually read. "
-    "The quoted codes / form numbers in the labels are the decisive clue.\n"
+    "Decide in this PRIORITY ORDER — text first, visuals only to confirm:\n"
+    "1. TEXT (DECISIVE). Read the document's TITLE (Thai and English) and any "
+    'short CODES: visa letters in quotes (e.g. "B", "F", "ED"), household-'
+    "registration form numbers (e.g. ทร.14, ทร.13/1), or the leading digits of a "
+    "13-digit ID number. Pick the list entry whose label keywords match what you "
+    "actually read. The quoted codes / form numbers in the labels are the "
+    "decisive clue and OVERRIDE any visual impression.\n"
+    "2. SHAPE & LAYOUT (confirm only, or when text is unreadable). Note the "
+    "format: a credit-card-sized card, a full A4 page / letter, a booklet spread "
+    "(e.g. a passport photo page), or a printed form with fields. An ID card and "
+    "a passport differ as card vs booklet, not as full pages.\n"
+    "3. COLOR (confirm, or as a tie-breaker). Note dominant and cover colors. "
+    "This separates look-alikes: a Thai house-registration book with a BLUE "
+    "cover is ทร.14 (เล่มปกสีน้ำเงิน) for Thai nationals, while the YELLOW book is "
+    "ทร.13 for non-Thai residents. Seals/emblems (e.g. the Garuda), photos, and "
+    "stamps are also visual cues.\n\n"
+    "Rules:\n"
+    "- If the text and the visuals DISAGREE, TRUST THE TEXT.\n"
     "- A Thai national ID says 'บัตรประจำตัวประชาชน'; do NOT confuse it with the "
     "non-Thai 'ไม่มีสัญชาติไทย' / 'คนต่างด้าว' cards.\n"
     "- If nothing matches, or it is unreadable, use id 0. return label as เอกสารอื่นๆ เพิ่มเติมที่น่าเชื่อถือ เพื่อขออนุมัติ BUCO\n"
@@ -102,9 +113,13 @@ _EVIDENCE_INSTRUCTIONS = (
 )
 _EVIDENCE_USER_TEXT = (
     "Step 1: read the document and quote its title text plus any codes you can "
-    "see. Step 2: choose the single best-matching id.\n"
+    "see (this is the PRIMARY signal). Step 2: note its visual look — shape / "
+    "format and dominant or cover color (SECONDARY, for confirmation or tie-"
+    "breaking). Step 3: choose the single best-matching id, trusting the text "
+    "over the visuals whenever they conflict.\n"
     "Respond with ONLY this JSON object and nothing else MAKE SURE IT IS PARSEABLE:\n"
     '{"evidence": "<title and codes you read>", '
+    '"visual": "<shape/format and dominant or cover color>", '
     '"id": <integer id from the list, or 0 for none>, '
     '"confidence": <number between 0 and 1>}'
 )
@@ -369,11 +384,15 @@ class TransformersProvider(LLMProvider):
             label = UNKNOWN_TYPE
         conf = parsed.get("confidence", parsed.get("confidence_score"))
         evidence = parsed.get("evidence")
-        # Audit trail: the quoted evidence plus the model's reasoning trace (if the
-        # model is a thinking variant). Truncate the trace so the record stays small.
+        visual = parsed.get("visual")
+        # Audit trail: the quoted text evidence (primary), the visual cues (shape/
+        # color, secondary), plus the model's reasoning trace (thinking variants).
+        # Truncate the trace so the record stays small.
         parts = []
         if evidence:
             parts.append(f"evidence={evidence}")
+        if visual:
+            parts.append(f"visual={visual}")
         if thinking:
             parts.append(f"thinking={thinking[:800]}")
         return LLMResult(
